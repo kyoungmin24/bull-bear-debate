@@ -12,3 +12,6 @@ __pycache__/
 myenv/
 .venv/
 venv/
+
+# 
+rag/faiss_store/
