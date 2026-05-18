@@ -31,18 +31,25 @@ def _normalize_and_build_index(embeddings: list[list[float]]) -> faiss.Index:
     return index
 
 
-def build_articles_index():
-    """articles 테이블 → articles.index"""
-    print("=== articles 인덱스 빌드 ===")
+def build_articles_index(ticker: str = None):
+    """articles 테이블 → articles.index. ticker 지정 시 해당 종목만."""
+    label = f"articles ({ticker})" if ticker else "articles"
+    print(f"=== {label} 인덱스 빌드 ===")
+
+    query = """
+        SELECT a.id, c.corp_name, a.title, a.content
+        FROM articles a
+        JOIN companies c ON a.ticker = c.ticker
+        WHERE a.title IS NOT NULL
+    """
+    params: tuple = ()
+    if ticker:
+        query += " AND a.ticker = ?"
+        params = (ticker,)
+    query += " ORDER BY a.published_at DESC"
 
     with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute("""
-            SELECT a.id, c.corp_name, a.title, a.summary
-            FROM articles a
-            JOIN companies c ON a.ticker = c.ticker
-            WHERE a.title IS NOT NULL
-            ORDER BY a.published_at DESC
-        """).fetchall()
+        rows = conn.execute(query, params).fetchall()
 
     if not rows:
         print("articles 데이터 없음. 종료.")
@@ -50,10 +57,10 @@ def build_articles_index():
 
     print(f"  대상: {len(rows)}건")
 
-    # 임베딩 텍스트 구성: [종목명] 제목. 요약
+    # 임베딩 텍스트 구성: [종목명] 제목. 본문 앞 500자
     texts = [
-        f"[{corp_name}] {title}. {summary or ''}".strip()
-        for _, corp_name, title, summary in rows
+        f"[{corp_name}] {title}. {(content or '')[:500]}".strip()
+        for _, corp_name, title, content in rows
     ]
 
     print("  임베딩 생성 중...")
@@ -66,8 +73,8 @@ def build_articles_index():
     faiss.write_index(index, str(index_path))
     print(f"  저장 완료 → {index_path}")
 
-    # SQLite faiss_id 업데이트
-    with sqlite3.connect(DB_PATH) as conn:
+    # SQLite faiss_id 업데이트 (크롤링 중 락 대비 timeout=30초)
+    with sqlite3.connect(DB_PATH, timeout=30) as conn:
         for faiss_id, (article_id, *_) in enumerate(rows):
             conn.execute(
                 "UPDATE articles SET faiss_id = ? WHERE id = ?",
@@ -127,13 +134,15 @@ def build_dart_index():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--articles", action="store_true", help="articles만 빌드")
-    parser.add_argument("--dart", action="store_true", help="dart만 빌드")
+    parser.add_argument("--dart",     action="store_true", help="dart만 빌드")
+    parser.add_argument("--ticker",   type=str, default=None,
+                        help="특정 종목만 임베딩 (예: 005930)")
     args = parser.parse_args()
 
     # 플래그 없으면 둘 다 빌드
     run_all = not args.articles and not args.dart
 
     if args.articles or run_all:
-        build_articles_index()
+        build_articles_index(ticker=args.ticker)
     if args.dart or run_all:
         build_dart_index()

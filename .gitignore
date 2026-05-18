@@ -13,5 +13,8 @@ myenv/
 .venv/
 venv/
 
-# 
+# FAISS 인덱스 (로컬 생성)
 rag/faiss_store/
+
+# IDE
+.idea/
