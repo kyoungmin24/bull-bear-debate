@@ -1,285 +1,221 @@
 # Bull vs Bear — AI 주식 토론 시스템
 
-> **Bull** vs **Bear** 토론하고, **Moderator** 가 최종 투자 의견을 제시하는 시스템.  
-> RAG(뉴스) + 정량 데이터(재무·컨센서스·주가)를 모두 활용합니다.
+> 한국 주식 종목을 입력하면 **Bull**(매수)·**Bear**(매도) 두 AI 에이전트가 실제 뉴스·정량 데이터를 근거로 토론하고, **Moderator** 가 최종 투자 의견을 종합하는 멀티 에이전트 RAG 시스템.
+
+> 📚 AI Agent 수업 팀 프로젝트(4인). 커밋 author 정보는 그대로 보존되어 있습니다.
 
 ---
 
-## 📌 핵심 한눈에 보기
+## 📌 한눈에 보기
 
 ```
-사용자 입력 (예: "삼성전자")
-        ↓
-   ┌───────────────────────────────────────┐
-   │ Round 1 (정성)  → 뉴스 기사 기반 토론       │
-   │ Round 2 (정량)  → 재무·주가 기반 토론       │
-   │ Round 3 (통합)  → 양측 최종 결론           │
-   │ Moderator      → 투자 판단 종합           │
-   └───────────────────────────────────────┘
-        ↓
-  React UI에 순차 출력 (Bull / Bear 메시지)
+사용자 입력 ("삼성전자")
+        │
+        ▼
+ ┌──────────────────────────────────────────────────────────┐
+ │  Profiler   설문 → 독자 페르소나(수준·용어·설명깊이·투자기간)   │
+ ├──────────────────────────────────────────────────────────┤
+ │  RAG        관점별 쿼리 확장 → 뉴스 검색 + 정량 데이터 결합     │
+ ├──────────────────────────────────────────────────────────┤
+ │  Round 1 (정성)   뉴스 기사 기반 주장·반론                    │
+ │  Round 2 (정량)   재무·컨센서스·주가 기반 주장·반론           │
+ │  Round 3 (통합)   양측 최종 결론                             │
+ │     ↳ 동적 라운드: 수렴 판정으로 조기 종료 / 자유 토론 연장     │
+ ├──────────────────────────────────────────────────────────┤
+ │  가드        Self-Reflection 자기검토 + 결정적 수치 검증기      │
+ ├──────────────────────────────────────────────────────────┤
+ │  Moderator  전체 토론 종합 → 투자 판단                       │
+ └──────────────────────────────────────────────────────────┘
+        │
+        ▼
+   React UI에 Bull/Bear 메시지 순차 출력 + 근거 기사
 ```
 
-**한 번 토론 = LLM 호출 11회 ≈ $0.05~0.08** (gpt-4o 기준)
+---
+
+## ✨ 주요 기능
+
+| 기능 | 설명 | 핵심 파일 |
+|:---|:---|:---|
+| **관점 분리 멀티 에이전트** | Bull·Bear를 단일 `AnalystAgent`(role 파라미터)로 통합, 주장→반론→결론 의존 관계를 가진 워크플로 | `agents/analyst.py`, `agents/orchestrator.py` |
+| **라운드별 데이터 스코핑** | R1=뉴스(정성), R2=정량, R3=통합. 각 라운드가 정해진 데이터만 사용 | `agents/config.py` (`DEBATE_FLOW`) |
+| **Tool Calling 조사** | 에이전트가 직접 검색·정량 도구 호출(function calling). `hybrid` 기본(사전 조사 후 부족 시 추가 조사) | `agents/tools.py` |
+| **동적 라운드** | 수렴 판정 기반으로 토론 조기 종료 또는 자유 토론 연장 | `agents/orchestrator.py` |
+| **사용자 페르소나** | 설문 → LLM 독자 프로필 → 설명 tier·분량·논거 강조를 답변에 반영(판단은 불변) | `agents/profiler.py`, `agents/prompts.py` |
+| **환각 가드** | Self-Reflection 자기검토 + 출력 수치를 입력 데이터와 대조하는 결정적 검증기 | `agents/verifier.py` |
+| **의존성 기반 병렬 실행** | 서로 의존하지 않는 LLM 호출은 `ThreadPoolExecutor`로 동시 실행 | `agents/orchestrator.py` |
 
 ---
 
 ## 🚀 빠른 시작
 
-### 1️⃣ 환경 설정
+### 1. 환경 설정
 
 ```bash
 python -m venv myenv
-source myenv/bin/activate
+source myenv/bin/activate        # Windows: myenv\Scripts\activate
 pip install -r requirements.txt
+pip install fastapi "uvicorn[standard]" pydantic   # API 서버 실행용
 ```
 
-`.env` 파일 생성:
+루트에 `.env` 생성:
 ```bash
 OPENAI_API_KEY=sk-...
 ```
 
-### 2️⃣ 데이터 수집 (한 번만 실행)
+### 2. 데이터 수집 (최초 1회)
 
 ```bash
-# 시가총액 상위 200개 기업 초기화
-python -m collection.companies
-
-# 뉴스 크롤링 (기업당 최대 50건)
-python -m collection.naver_news_crawling
-
-# 재무제표 / 컨센서스 / 주가
-python -m collection.financials
-python -m collection.consensus
-python -m collection.quant_macro_daily
+python -m collection.companies              # 시총 상위 기업 초기화
+python -m collection.naver_news_crawling    # 네이버 증권 뉴스
+python -m collection.financials             # 재무제표
+python -m collection.consensus              # 증권사 컨센서스
+python -m collection.quant_macro_daily      # 주가·수급·PER·PBR
 ```
 
-### 3️⃣ FAISS 인덱스 빌드
+### 3. FAISS 인덱스 빌드
 
 ```bash
-# 전체 기사 임베딩
-python -m rag.index_builder --articles
-
-# 특정 종목만 (테스트)
-python -m rag.index_builder --articles --ticker 005930
+python -m rag.index_builder --articles                 # 전체 기사 임베딩
+python -m rag.index_builder --articles --ticker 005930 # 특정 종목만(테스트)
 ```
 
-### 4️⃣ 프론트엔드 빌드
+### 4. 실행
 
 ```bash
-cd frontend
-npm install
-npm run build
-```
-
-### 5️⃣ 서버 실행
-
-```bash
+# 웹 UI (정식 진입점)
+cd frontend && npm install && npm run build && cd ..
 uvicorn main:app --reload --port 8000
-```
+# → http://localhost:8000
 
-→ 브라우저에서 **http://localhost:8000** 접속
+# 또는 터미널에서 빠르게 토론 확인
+python test_debate.py
+```
 
 ---
 
 ## 📂 폴더 구조
 
 ```
-BullBear/
+Bull-Bear/
+├── main.py                    # FastAPI 서버 (정식 진입점)
+├── test_debate.py             # 터미널 토론 테스트 (CLI 진입점)
 │
-├── main.py                       # FastAPI 서버 엔트리포인트
+├── agents/                    # ★ 멀티 에이전트 토론 로직
+│   ├── config.py                 # ⭐ 설정 (모델·온도·DEBATE_FLOW·기능 플래그)
+│   ├── prompts.py                # ⭐ 프롬프트·Few-shot·페르소나 빌더
+│   ├── orchestrator.py           # 토론 흐름 실행 엔진(병렬·동적 라운드)
+│   ├── analyst.py                # Bull/Bear 통합 (AnalystAgent)
+│   ├── moderator.py              # 사회자 (최종 종합)
+│   ├── profiler.py               # 설문 → 독자 페르소나
+│   ├── tools.py                  # function calling 도구 (검색·정량)
+│   ├── verifier.py               # 결정적 수치 검증기 (환각 가드)
+│   ├── memory.py                 # 과거 토론 참조(옵션)
+│   ├── base_agent.py             # OpenAI 호출 기반 클래스
+│   └── query_expander.py         # 주제 → 관점별 검색 쿼리
 │
-├── agents/                       # AI 에이전트 (★ 토론 로직 핵심)
-│   ├── config.py                    # ⭐ 설정 (모델, 온도, 발언 순서)
-│   ├── prompts.py                   # ⭐ 프롬프트 텍스트
-│   ├── analyst.py                   # Bull/Bear 통합 (AnalystAgent)
-│   ├── moderator.py                 # 사회자
-│   ├── orchestrator.py              # 토론 흐름 실행 엔진
-│   ├── base_agent.py                # OpenAI 호출 기반
-│   └── query_expander.py            # 주제 → 검색 쿼리 확장
+├── rag/                       # 검색 증강 생성
+│   ├── retriever.py              # FAISS 검색 + SQLite 메타 조회
+│   ├── index_builder.py          # 벡터 인덱스 빌드 (IndexFlatIP=cosine)
+│   ├── embedder.py               # OpenAI 임베딩 래퍼
+│   └── quant_fetcher.py          # 정량 데이터 조회·포맷
 │
-├── rag/                          # RAG (검색 증강 생성)
-│   ├── retriever.py                 # FAISS 검색 + SQLite 메타 조회
-│   ├── index_builder.py             # 벡터 인덱스 빌드
-│   ├── embedder.py                  # OpenAI 임베딩 래퍼
-│   ├── quant_fetcher.py             # 정량 데이터 조회·포맷
-│   └── faiss_store/articles.index   # 벡터 인덱스 (빌드 후 생성)
+├── collection/                # 데이터 수집 스크립트
+│   ├── companies.py / naver_news_crawling.py
+│   ├── financials.py / consensus.py / quant_macro_daily.py
+│   └── dart_disclosures.py
 │
-├── collection/                   # 데이터 수집 스크립트
-│   ├── companies.py                 # 기업 목록 초기화 (KOSPI 200)
-│   ├── naver_news_crawling.py       # 네이버 증권 뉴스 크롤러
-│   ├── financials.py                # 분기 재무제표
-│   ├── consensus.py                 # 증권사 컨센서스
-│   ├── quant_macro_daily.py         # 일별 주가·수급·PER·PBR
-│   └── dart_disclosures.py          # DART 공시 (선택)
+├── frontend/                  # React + Vite + Tailwind (UI)
+│   └── src/app/components/       # InputScreen, LoadingScreen, DebateChat ...
 │
-├── frontend/                     # React + Vite + Tailwind
-│   └── src/app/
-│       ├── App.tsx
-│       └── components/
-│           ├── InputScreen.tsx      # 종목 입력 화면
-│           ├── LoadingScreen.tsx    # 로딩 화면
-│           ├── DebateChat.tsx       # 토론 채팅 화면
-│           ├── DebateMessage.tsx    # 메시지 버블
-│           └── ArticleReference.tsx # 참고 기사 카드
-│
-├── streamlit_app.py                 # (구버전) Streamlit UI
-├── test_debate.py                   # 터미널 토론 테스트
-├── identifier.sqlite                # 메인 DB
-└── .env                             # API 키
+├── docs/                      # 설계·실험 문서
+└── streamlit_app.py           # (구버전, 레거시) Streamlit UI
 ```
 
 ---
 
-## 🎭 토론 구조 (핵심)
-
-### 라운드별 발언 순서
+## 🎭 토론 구조
 
 | 라운드 | 데이터 | 선공 | 발언 순서 |
 |:---:|:---|:---:|:---|
-| **R1** | 뉴스 기사 | Bull | ① 찬성 주장 → ② 반대 반론 → ③ 반대 주장 → ④ 찬성 반론 |
-| **R2** | 재무·주가 | Bear | ① 반대 주장 → ② 찬성 반론 → ③ 찬성 주장 → ④ 반대 반론 |
-| **R3** | 통합 | — | ① 찬성 최종 결론 → ② 반대 최종 결론 |
-| **Mod** | 전체 토론 | — | 투자 판단 (매수 적극 / 분할 매수 / 관망 / 매도 고려) |
+| **R1** | 뉴스 기사 | Bull | ① Bull 주장 → ② Bear 반론 → ③ Bear 주장 → ④ Bull 반론 |
+| **R2** | 재무·주가 | Bear | ① Bear 주장 → ② Bull 반론 → ③ Bull 주장 → ④ Bear 반론 |
+| **R3** | 통합 | — | ① Bull 최종 결론 → ② Bear 최종 결론 |
+| **Mod** | 전체 | — | 투자 판단 (매수 적극 / 분할 매수 / 관망 / 매도 고려) |
 
-### 핵심 원칙
-
-1. **반론은 상대 주장을 받아서 생성**  
-   → 반론자의 프롬프트에 상대방의 직전 주장이 입력으로 들어감
-
-2. **라운드 간 독립성**  
-   → R2는 R1 출력을 참조하지 않음. 각 라운드는 raw 데이터만 사용
-
-3. **병렬 호출로 속도 최적화**  
-   → 의존성 없는 주장은 동시에 호출 (Bull.argue + Bear.argue 병렬)
+**핵심 원칙**
+1. 반론은 상대의 직전 주장을 입력으로 받아 생성한다.
+2. 각 라운드는 정해진 raw 데이터만 사용한다(라운드 간 출력 비참조).
+3. 의존성 없는 발언은 병렬 호출한다.
+4. 동적 모드에서는 수렴 판정으로 조기 종료하거나 자유 토론을 연장한다.
 
 ---
 
-## ⚙️ 토론 커스터마이징
+## ⚙️ 커스터마이징
 
-모든 설정은 **`agents/config.py`** 하나에 모여 있습니다.
-
-### 모델·온도 변경
+모든 설정은 **`agents/config.py`** 한 곳에 모여 있다.
 
 ```python
-# agents/config.py
-MODEL_NAME = "gpt-4o"          # → "gpt-4o-mini"로 바꾸면 비용 1/10
+MODEL_NAME = "gpt-4o-mini"        # "gpt-4o", "o3-mini" 등으로 교체 가능
 
-TEMPERATURE = {
-    "argue":     0.4,          # 주장: 환각 억제 위해 낮춤
-    "rebut":     0.4,          # 반론: 환각 억제 위해 낮춤
-    "conclude":  0.3,          # 결론: 일관성
-    "moderator": 0.3,          # 사회자: 일관성
-}
+ENABLE_REFLECTION     = True       # Self-Reflection 자기검토
+ENABLE_TOOL_CALLING   = True       # 에이전트 도구 호출
+ENABLE_DYNAMIC_ROUNDS = True       # 수렴 기반 동적 라운드
+ENABLE_FEW_SHOT       = True
+ENABLE_COT            = False
+RESEARCH_MODE         = "hybrid"   # "per_step" | "upfront" | "hybrid"
+
+DEBATE_FLOW = [ ... ]              # 라운드·발언 순서·데이터 종류 자유 편집
 ```
 
-### 발언 순서 변경
-
-```python
-# agents/config.py
-DEBATE_FLOW = [
-    {
-        "round": 1,
-        "name":  "정성 분석",
-        "data":  ["articles"],          # ["quant"], ["articles","quant"] 가능
-        "steps": [
-            {"role": "bull", "action": "argue"},
-            {"role": "bear", "action": "rebut", "rebuts": ("bull", "argue")},
-            {"role": "bear", "action": "argue"},
-            {"role": "bull", "action": "rebut", "rebuts": ("bear", "argue")},
-        ],
-    },
-    # ... 라운드 추가/제거 자유
-]
-```
-
-| 필드 | 값 | 설명 |
-|:---|:---|:---|
-| `role` | `"bull"` / `"bear"` | 누가 발언하는지 |
-| `action` | `"argue"` / `"rebut"` / `"conclude"` | 주장 / 반론 / 결론 |
-| `rebuts` | `("role", "action")` | 반론 대상 (action=rebut일 때만) |
-| `data` | `["articles"]` / `["quant"]` / `["articles","quant"]` | 사용 데이터 종류 |
-
-> 💡 의존성 없는 step은 **자동 병렬 실행**
-
-### 프롬프트 수정
-
-`agents/prompts.py`에 모든 프롬프트가 모여 있습니다:
-
-```
-SYSTEM_PROMPT_BULL       Bull 페르소나
-SYSTEM_PROMPT_BEAR       Bear 페르소나
-SYSTEM_PROMPT_MODERATOR  Moderator 페르소나
-build_argue_prompt()     주장 프롬프트
-build_rebut_prompt()     반론 프롬프트
-build_conclude_prompt()  결론 프롬프트
-build_moderator_prompt() 사회자 프롬프트
-```
+> 발언 순서/라운드는 `DEBATE_FLOW` 리스트만 바꾸면 되고, 의존성 없는 step은 자동 병렬 실행된다.
 
 ---
 
-## 🔍 RAG 동작 방식
+## 🔍 RAG 동작
 
 ```
 사용자 입력
-    ↓
-[query_expander]  ─→  3종 쿼리 생성 (룰 기반, LLM 호출 X)
-                        • common: 중립 (예: "삼성전자 최근 실적 현황")
-                        • bull:   긍정 (예: "삼성전자 성장 호재")
-                        • bear:   부정 (예: "삼성전자 리스크 악재")
-    ↓
-[embedder]        ─→  OpenAI text-embedding-3-small (1536차원)
-    ↓
-[FAISS]           ─→  벡터 유사도 검색
-    ↓
-[SQLite]          ─→  faiss_id로 메타데이터(title, content, url) 조회
-    ↓
-Bull에게: common(3) + bull(2) = 5개 기사
-Bear에게: common(3) + bear(2) = 5개 기사
+   │  query_expander → 3종 쿼리 (룰 기반)
+   │     • common(중립) / bull(긍정) / bear(부정)
+   ▼
+embedder (text-embedding-3-small, 1536차원)
+   ▼
+FAISS (IndexFlatIP = cosine) → 유사도 검색
+   ▼
+SQLite → faiss_id로 원문·메타데이터(title, content, url) 조회
+   ▼
+Bull: common(3) + bull(2)   /   Bear: common(3) + bear(2)
+정량 데이터(재무·컨센서스·주가)는 종목 코드로 최신 레코드 조회·결합
 ```
 
 ---
 
-## 🗄️ DB 스키마
+## 🛠️ 기술 스택
 
-| 테이블 | 내용 |
+| 구분 | 기술 |
 |:---|:---|
-| `companies` | 시가총액 상위 200개 기업 (ticker, name, market_cap) |
-| `articles` | 네이버 증권 뉴스 + faiss_id (제목, 본문, URL, 출처) |
-| `financials` | 분기별 재무제표 (매출/영업이익/순이익) |
-| `consensus_snapshots` | 증권사 목표주가·투자의견 스냅샷 |
-| `quant_daily` | 주가·수급·PER·PBR 일별 데이터 |
-| `dart_disclosures` | DART 공시 목록 |
+| AI | OpenAI Chat Completions (`gpt-4o-mini`), function calling, JSON response format |
+| RAG | `text-embedding-3-small`, FAISS `IndexFlatIP` |
+| 백엔드 | FastAPI, Pydantic, `ThreadPoolExecutor` |
+| 프론트엔드 | React 18, Vite, Tailwind CSS |
+| 데이터 | SQLite, pandas, BeautifulSoup / 네이버 증권, OpenDART, pykrx, FinanceDataReader |
 
 ---
 
-## 💰 비용 추정
-
-| 항목 | 토큰 | 단가 (GPT-4o) | 비용 |
-|:---|:---:|:---:|:---:|
-| 입력 (11회 × ~1,300) | ~14,000 | $2.50/1M | $0.035 |
-| 출력 (11회 × ~180) | ~2,000 | $10.00/1M | $0.020 |
-| **1회 토론** | | | **$0.05~0.08** |
-
-> 🪙 `gpt-4o-mini` 사용 시 약 **1/10 수준**으로 절감
-
----
-
-## 🛠️ 트러블슈팅
+## 🚧 트러블슈팅
 
 | 증상 | 해결 |
 |:---|:---|
 | `ModuleNotFoundError: faiss` | `pip install faiss-cpu` |
-| `OPENAI_API_KEY` 없음 | 프로젝트 루트에 `.env` 생성 |
+| `OPENAI_API_KEY` 없음 | 루트에 `.env` 생성 |
 | `database is locked` | 크롤링 진행 중 → 잠시 후 재시도 |
-| 화면 빈 흰 화면 | 브라우저 `Cmd + Shift + R` 강제 새로고침 |
-| 빌드 후 변경 반영 안 됨 | `cd frontend && npm run build` 후 uvicorn 재시작 |
+| 빈 흰 화면 | 브라우저 강제 새로고침 (`Ctrl/Cmd + Shift + R`) |
+| 빌드 변경 반영 안 됨 | `cd frontend && npm run build` 후 uvicorn 재시작 |
 
 ---
 
-## 📚 참고
+## 📚 더 보기
 
-- **모델**: GPT-4o + `response_format={"type": "json_object"}`
-- **임베딩**: OpenAI `text-embedding-3-small`
-- **벡터 DB**: FAISS (IndexFlatL2)
-- **데이터 소스**: 네이버 증권, FinanceDataReader, pykrx, DART
+- [`docs/tool-calling-and-persona.md`](docs/tool-calling-and-persona.md) — 도구 호출·페르소나 설계
+- [`docs/reliability-and-trust.md`](docs/reliability-and-trust.md) — 신뢰성·환각 가드
